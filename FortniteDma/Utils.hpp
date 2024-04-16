@@ -3,8 +3,11 @@
 #include <vector>
 #include "Settings.hpp"
 #include <mutex>
+#include <unordered_map>
 #pragma comment(lib, "d3d9.lib")
 #define M_PI 3.14159265358979323846264338327950288419716939937510
+#define DEBUG true
+#define EXEC_ON_DEBUG(x) if (DEBUG) { x; }
 
 class Vector2
 {
@@ -151,13 +154,12 @@ struct FNRot
 
 struct MeshInfoContainer
 {
+	uintptr_t player_state;
 	uintptr_t head_bone;
 	FTransform cached_head_bone;
 	uintptr_t component_to_world;
 	FTransform cached_component_to_world;
 };
-
-
 
 
 namespace offsets
@@ -171,6 +173,7 @@ namespace offsets
 	inline int meshcomponent_to_bonearray = 0x5b0;
 	inline int meshcomponent_to_componenttoworld = 0x1c0;
 	inline int playercontroller_to_rotationinput = 0x520;
+	inline int pawn_to_isdying = 0x758;
 
 }
 
@@ -192,6 +195,10 @@ namespace cache
 	inline MeshInfoContainer closest_mesh_info;
 	inline Camera local_camera;
 	inline std::vector<MeshInfoContainer> mesh_info;
+	// Hashmap that maps player state to mesh info
+	inline std::unordered_map<uintptr_t, MeshInfoContainer> mesh_info_map;
+	// mesh_info cache to be used by aimbot thread
+	inline std::vector<MeshInfoContainer> mesh_info_cache;
 	// Mutex for DMA memory read between threads
 	inline std::mutex mem_mutex;
 }
@@ -241,7 +248,17 @@ struct CompareDistance
 {
 	bool operator()(const MeshInfoContainer& a, const MeshInfoContainer& b)
 	{
-		return get_world_space_coords(a.cached_head_bone, a.cached_component_to_world).distance(cache::local_camera.location) < get_world_space_coords(b.cached_head_bone, b.cached_component_to_world).distance(cache::local_camera.location);
+		// Distance from center screen
+		Vector2 screen_center = { (double)settings::screen_center_x, (double)settings::screen_center_y };
+		Vector3 world_space_a = get_world_space_coords(a.cached_head_bone, a.cached_component_to_world);
+		Vector3 world_space_b = get_world_space_coords(b.cached_head_bone, b.cached_component_to_world);
+		Vector2 a_screen = project_world_to_screen(world_space_a);
+		Vector2 b_screen = project_world_to_screen(world_space_b);
+		float world_space_distance_a = world_space_a.distance(cache::local_camera.location);
+		float world_space_distance_b = world_space_b.distance(cache::local_camera.location);
+		double a_distance = (a_screen - screen_center).x * (a_screen - screen_center).x + (a_screen - screen_center).y * (a_screen - screen_center).y + world_space_distance_a * world_space_distance_a;
+		double b_distance = (b_screen - screen_center).x * (b_screen - screen_center).x + (b_screen - screen_center).y * (b_screen - screen_center).y + world_space_distance_b * world_space_distance_b;
+		return a_distance < b_distance;
 	}
 };
 
@@ -252,17 +269,34 @@ uintptr_t get_all_player_meshes(int interval) {
 
 	while (true) {
 		{
-			// Lock mutex
-			std::lock_guard<std::mutex> lock(cache::mem_mutex);
+			
+			// Measure performance
+			auto start = std::chrono::high_resolution_clock::now();
+
 			int player_count = mem.Read<int>(cache::player_array + 0x8);
 			cache::player_count = player_count;
 
 			uintptr_t player_array_cursor = mem.Read<uintptr_t>(cache::player_array);
 
 			cache::mesh_info.clear();
+			uintptr_t player_state_arr[200];
+			mem.Read(player_array_cursor, player_state_arr, player_count * 0x8);
 
+			// Update all mesh info for all player states in player_state_arr found in mesh_info, otherwise read mesh info from memory and add it to mesh_info
 			for (int i = 0; i < player_count; i++) {
-				uintptr_t player_state = mem.Read<uintptr_t>(player_array_cursor + i * 0x8);
+				// Lock mutex
+				//std::lock_guard<std::mutex> lock(cache::mem_mutex);
+				// 
+				// Check if player state in player_state_arr is found in mesh_info_map
+				/*if (cache::mesh_info_map.find(player_state_arr[i]) != cache::mesh_info_map.end()) {
+					auto cached_mesh_info = cache::mesh_info_map[player_state_arr[i]];
+					cached_mesh_info.cached_head_bone = mem.Read<FTransform>(cached_mesh_info.head_bone);
+					cached_mesh_info.cached_component_to_world = mem.Read<FTransform>(cached_mesh_info.component_to_world);
+					cache::mesh_info.push_back(cached_mesh_info);
+					continue;
+				}*/
+				// Update mesh info for player state
+				uintptr_t player_state = player_state_arr[i];
 				uintptr_t player_pawn = mem.Read<uintptr_t>(player_state + offsets::playerstate_to_ppawn);
 				uintptr_t player_controller = mem.Read<uintptr_t>(player_pawn + offsets::pawn_to_controller);
 				if (player_controller == cache::player_controller) {
@@ -276,13 +310,30 @@ uintptr_t get_all_player_meshes(int interval) {
 				FTransform head_transform = mem.Read<FTransform>(head_bone);
 				uintptr_t component_to_world = player_mesh_component + offsets::meshcomponent_to_componenttoworld;
 				FTransform component_to_world_transform = mem.Read<FTransform>(component_to_world);
-				cache::mesh_info.push_back({ head_bone, head_transform, component_to_world, component_to_world_transform });
+				cache::mesh_info.push_back({ player_state, head_bone, head_transform, component_to_world, component_to_world_transform });
+				//cache::mesh_info_map[player_state] = { player_state, head_bone, head_transform, component_to_world, component_to_world_transform };
 			}
+			
 
-			// Update camera location
-			cache::local_camera.location = get_updated_viewpoint_location();
+			//// Update camera location
+			//cache::local_camera.location = get_updated_viewpoint_location();
 			// Sort by distance
-			std::sort(cache::mesh_info.begin(), cache::mesh_info.end(), CompareDistance());
+			std::vector<MeshInfoContainer> mesh_info_copy = cache::mesh_info;
+			
+			std::sort(mesh_info_copy.begin(), mesh_info_copy.end(), CompareDistance());
+
+			{
+				// Lock mutex
+				std::lock_guard<std::mutex> lock(cache::mem_mutex);
+				cache::mesh_info_cache = std::move(mesh_info_copy);
+			}
+			
+			
+
+			// Print performance
+			auto end = std::chrono::high_resolution_clock::now();
+			std::chrono::duration<double> elapsed = end - start;
+			EXEC_ON_DEBUG(std::cout << "Time to read all player meshes: " << elapsed.count() << "s" << std::endl);
 		}
 
 		Sleep(interval);
