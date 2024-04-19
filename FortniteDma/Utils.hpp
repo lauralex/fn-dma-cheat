@@ -47,25 +47,25 @@ struct FTransform
 		m._41 = translation.x;
 		m._42 = translation.y;
 		m._43 = translation.z;
-		float x2 = rot.x + rot.x;
-		float y2 = rot.y + rot.y;
-		float z2 = rot.z + rot.z;
-		float xx2 = rot.x * x2;
-		float yy2 = rot.y * y2;
-		float zz2 = rot.z * z2;
+		double x2 = rot.x + rot.x;
+		double y2 = rot.y + rot.y;
+		double z2 = rot.z + rot.z;
+		double xx2 = rot.x * x2;
+		double yy2 = rot.y * y2;
+		double zz2 = rot.z * z2;
 		m._11 = (1.0f - (yy2 + zz2)) * scale.x;
 		m._22 = (1.0f - (xx2 + zz2)) * scale.y;
 		m._33 = (1.0f - (xx2 + yy2)) * scale.z;
-		float yz2 = rot.y * z2;
-		float wx2 = rot.w * x2;
+		double yz2 = rot.y * z2;
+		double wx2 = rot.w * x2;
 		m._32 = (yz2 - wx2) * scale.z;
 		m._23 = (yz2 + wx2) * scale.y;
-		float xy2 = rot.x * y2;
-		float wz2 = rot.w * z2;
+		double xy2 = rot.x * y2;
+		double wz2 = rot.w * z2;
 		m._21 = (xy2 - wz2) * scale.y;
 		m._12 = (xy2 + wz2) * scale.x;
-		float xz2 = rot.x * z2;
-		float wy2 = rot.w * y2;
+		double xz2 = rot.x * z2;
+		double wy2 = rot.w * y2;
 		m._31 = (xz2 + wy2) * scale.z;
 		m._13 = (xz2 - wy2) * scale.x;
 		m._14 = 0.0f;
@@ -100,15 +100,15 @@ D3DMATRIX matrix_multiplication(D3DMATRIX pm1, D3DMATRIX pm2)
 
 D3DMATRIX to_matrix(Vector3 rot, Vector3 origin = Vector3(0, 0, 0))
 {
-	float radpitch = (rot.x * M_PI / 180);
-	float radyaw = (rot.y * M_PI / 180);
-	float radroll = (rot.z * M_PI / 180);
-	float sp = sinf(radpitch);
-	float cp = cosf(radpitch);
-	float sy = sinf(radyaw);
-	float cy = cosf(radyaw);
-	float sr = sinf(radroll);
-	float cr = cosf(radroll);
+	double radpitch = (rot.x * M_PI / 180);
+	double radyaw = (rot.y * M_PI / 180);
+	double radroll = (rot.z * M_PI / 180);
+	double sp = sinf(radpitch);
+	double cp = cosf(radpitch);
+	double sy = sinf(radyaw);
+	double cy = cosf(radyaw);
+	double sr = sinf(radroll);
+	double cr = cosf(radroll);
 	D3DMATRIX matrix{};
 	matrix.m[0][0] = cp * cy;
 	matrix.m[0][1] = cp * sy;
@@ -190,7 +190,7 @@ namespace cache
 	inline uintptr_t game_state;
 	inline uintptr_t player_array;
 	inline int player_count;
-	inline float closest_distance;
+	inline double closest_distance;
 	inline uintptr_t closest_mesh;
 	inline MeshInfoContainer closest_mesh_info;
 	inline Camera local_camera;
@@ -254,10 +254,10 @@ struct CompareDistance
 		Vector3 world_space_b = get_world_space_coords(b.cached_head_bone, b.cached_component_to_world);
 		Vector2 a_screen = project_world_to_screen(world_space_a);
 		Vector2 b_screen = project_world_to_screen(world_space_b);
-		float world_space_distance_a = world_space_a.distance(cache::local_camera.location);
-		float world_space_distance_b = world_space_b.distance(cache::local_camera.location);
-		double a_distance = (a_screen - screen_center).x * (a_screen - screen_center).x + (a_screen - screen_center).y * (a_screen - screen_center).y + world_space_distance_a * world_space_distance_a;
-		double b_distance = (b_screen - screen_center).x * (b_screen - screen_center).x + (b_screen - screen_center).y * (b_screen - screen_center).y + world_space_distance_b * world_space_distance_b;
+		double world_space_distance_a = world_space_a.distance(cache::local_camera.location);
+		double world_space_distance_b = world_space_b.distance(cache::local_camera.location);
+		double a_distance = 0.3 * (a_screen - screen_center).x * (a_screen - screen_center).x + 0.3 * (a_screen - screen_center).y * (a_screen - screen_center).y + 0.7 * world_space_distance_a * world_space_distance_a;
+		double b_distance = 0.3 * (b_screen - screen_center).x * (b_screen - screen_center).x + 0.3 * (b_screen - screen_center).y * (b_screen - screen_center).y + 0.7 * world_space_distance_b * world_space_distance_b;
 		return a_distance < b_distance;
 	}
 };
