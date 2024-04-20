@@ -10,142 +10,152 @@ void aimbot() {
 	bool aimbot_in_action = false;
 	double damp_coeff = 1; //increase this value to increase starting aggressiveness
 	while (true) {
+		try {
+			if (mem.GetKeyboard()->IsKeyDown(VK_RBUTTON) && settings::aimbot::enable) {
+				double previous_pitch_error = 0;
+				double previous_yaw_error = 0;
+				double pitch_integral = 0;
+				double yaw_integral = 0;
+				//double kp = 0.5; //increase this value to increase aggressiveness
+				double ki = 0.0000; //increase this value to increase aggressiveness
+				double kd = 9.0; //increase this value to increase aggressiveness
+				while (true) {
+					try {
+						if (!mem.GetKeyboard()->IsKeyDown(VK_RBUTTON) || !settings::aimbot::enable) {
+							break;
+						}
+						// aimbot code
+						// Measure performance
+						auto start = std::chrono::high_resolution_clock::now();
 
-		if (mem.GetKeyboard()->IsKeyDown(VK_RBUTTON) && settings::aimbot::enable) {
-			double previous_pitch_error = 0;
-			double previous_yaw_error = 0;
-			double pitch_integral = 0;
-			double yaw_integral = 0;
-			double kp = 0.5; //increase this value to increase aggressiveness
-			double ki = 0.0005; //increase this value to increase aggressiveness
-			double kd = 0.0268; //increase this value to increase aggressiveness
-			while (true) {
-				if (!mem.GetKeyboard()->IsKeyDown(VK_RBUTTON) || !settings::aimbot::enable) {
-					break;
-				}
-				// aimbot code
-				// Measure performance
-				auto start = std::chrono::high_resolution_clock::now();
+						std::vector<MeshInfoContainer> nearest_mesh_info;
+						// Get the nearest 3 mesh info
+						{
+							// Lock mutex
+							std::lock_guard<std::mutex> lock(cache::mem_mutex);
+							// Get the nearest 3 mesh info if 3 are available, otherwise only one
+							for (int i = 0; i < 3 && i < cache::mesh_info_cache.size(); i++) {
+								nearest_mesh_info.push_back(cache::mesh_info_cache[i]);
+							}
+						}
 
-				std::vector<MeshInfoContainer> nearest_mesh_info;
-				// Get the nearest 3 mesh info
-				{
-					// Lock mutex
-					std::lock_guard<std::mutex> lock(cache::mem_mutex);
-					// Get the nearest 3 mesh info if 3 are available, otherwise only one
-					for (int i = 0; i < 3 && i < cache::mesh_info_cache.size(); i++) {
-						nearest_mesh_info.push_back(cache::mesh_info_cache[i]);
+						if (mem.GetKeyboard()->IsKeyDown(VK_LBUTTON)) {
+							if (damp_coeff > 0.5) { //reduce this to increase damping power
+								damp_coeff -= 0.001;
+								// reduce this value to reduce damping effect
+							}
+						}
+						else {
+							damp_coeff = 1;
+						}
+
+
+						// Check the distances of cached nearest mesh info
+						cache::closest_distance = FLT_MAX;
+						for (int i = 0; i < nearest_mesh_info.size(); i++) {
+							// Get real head bone
+							FTransform head_bone = mem.Read<FTransform>(nearest_mesh_info[i].head_bone);
+							// Get real component to world
+							FTransform component_to_world = mem.Read<FTransform>(nearest_mesh_info[i].component_to_world);
+							Vector2 screen_center = { (double)settings::screen_center_x, (double)settings::screen_center_y };
+							Vector3 world_space = get_world_space_coords(head_bone, component_to_world);
+							double world_space_distance = world_space.distance(cache::local_camera.location);
+							Vector2 a_screen = project_world_to_screen(world_space);
+							double distance = 0.3 * (a_screen - screen_center).x * (a_screen - screen_center).x + 0.3 * (a_screen - screen_center).y * (a_screen - screen_center).y;
+							bool is_dying = mem.Read<bool>(mem.ReadChain(nearest_mesh_info[i].player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isdying);
+							if (distance < cache::closest_distance && !is_dying) {
+								cache::closest_distance = distance;
+								nearest_mesh_info[i].cached_head_bone = head_bone;
+								nearest_mesh_info[i].cached_component_to_world = component_to_world;
+								cache::closest_mesh_info = nearest_mesh_info[i];
+							}
+						}
+
+						// Get the head bone and component to world of the closest mesh
+						FTransform head_bone = cache::closest_mesh_info.cached_head_bone;
+						FTransform component_to_world = cache::closest_mesh_info.cached_component_to_world;
+						// Get the world space coordinates of the head bone
+						Vector3 head_world = get_world_space_coords(head_bone, component_to_world);
+						// Project the world space coordinates to screen
+						Vector2 head_screen = project_world_to_screen(head_world);
+
+						// Print the head screen coordinates
+						EXEC_ON_DEBUG(std::cout << "Head Screen X: " << head_screen.x << " Y: " << head_screen.y << std::endl);
+
+						// Get the center of the screen
+						Vector2 screen_center = { (double)settings::screen_center_x, (double)settings::screen_center_y };
+
+						// Calculate the difference between the head screen and the screen center
+						Vector2 diff = head_screen - screen_center;
+
+						// Adjust player controller rotation until diff is below a certain threshold
+
+						// Calculate vector length squared
+						double vector_length_squared = diff.x * diff.x + diff.y * diff.y;
+
+						if (vector_length_squared > 2 && abs(diff.x) < settings::width && abs(diff.y) < settings::height) {
+
+							pitch_integral += -diff.y / settings::height;
+							yaw_integral += diff.x / settings::width;
+
+							double derivative_pitch = -diff.y / settings::height - previous_pitch_error;
+							double derivative_yaw = diff.x / settings::width - previous_yaw_error;
+
+							// Get the player controller rotation
+							uintptr_t rotation_input = cache::player_controller + offsets::playercontroller_to_rotationinput;
+							double smoothness_y = 20.0;
+							double smoothness_x = 20.0;
+							// Print the difference
+							EXEC_ON_DEBUG(std::cout << "Diff X: " << diff.x << " Y: " << diff.y << std::endl);
+							if (abs(diff.y) < 10) {
+								smoothness_y = 30.0;
+							}
+							if (abs(diff.y) < 5) {
+								smoothness_y = 20.0;
+							}
+							if (abs(diff.x) < 10) {
+								smoothness_x = 30.0;
+							}
+							if (abs(diff.x) < 5) {
+								smoothness_x = 20.0;
+							}
+							// Set pitch rotation
+							if (abs(diff.y) > 2) {
+								mem.Write<double>(rotation_input, -diff.y / settings::height * 15.0 + pitch_integral * ki + kd * derivative_pitch);
+							}
+
+							// Set yaw rotation
+							if (abs(diff.x) > 2) {
+								mem.Write<double>(rotation_input + 0x8, diff.x / settings::width * 15.0 + yaw_integral * ki + kd * derivative_yaw);
+							}
+							previous_pitch_error = -diff.y / settings::height;
+							previous_yaw_error = diff.x / settings::width;
+						}
+
+						aimbot_in_action = true;
+						// Print performance
+						auto end = std::chrono::high_resolution_clock::now();
+						std::chrono::duration<double> elapsed = end - start;
+						EXEC_ON_DEBUG(std::cout << "Aimbot performance: " << elapsed.count() << "s" << std::endl);
+						Sleep(2);
+					}
+					catch (std::exception e) {
+						std::cout << e.what() << std::endl;
 					}
 				}
-
-				if (mem.GetKeyboard()->IsKeyDown(VK_LBUTTON)) {
-					if (damp_coeff > 0.5) { //reduce this to increase damping power
-						damp_coeff -= 0.001;
-						// reduce this value to reduce damping effect
-					}
-				}
-				else {
-					damp_coeff = 1;
-				}
-
-
-				// Check the distances of cached nearest mesh info
-				cache::closest_distance = FLT_MAX;
-				for (int i = 0; i < nearest_mesh_info.size(); i++) {
-					// Get real head bone
-					FTransform head_bone = mem.Read<FTransform>(nearest_mesh_info[i].head_bone);
-					// Get real component to world
-					FTransform component_to_world = mem.Read<FTransform>(nearest_mesh_info[i].component_to_world);
-					Vector2 screen_center = { (double)settings::screen_center_x, (double)settings::screen_center_y };
-					Vector3 world_space = get_world_space_coords(head_bone, component_to_world);
-					double world_space_distance = world_space.distance(cache::local_camera.location);
-					Vector2 a_screen = project_world_to_screen(world_space);
-					double distance = 0.3 * (a_screen - screen_center).x * (a_screen - screen_center).x + 0.3 * (a_screen - screen_center).y * (a_screen - screen_center).y + 0.7 * world_space_distance * world_space_distance;
-					bool is_dying = mem.Read<bool>(mem.ReadChain(nearest_mesh_info[i].player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isdying);
-					if (distance < cache::closest_distance && !is_dying) {
-						cache::closest_distance = distance;
-						nearest_mesh_info[i].cached_head_bone = head_bone;
-						nearest_mesh_info[i].cached_component_to_world = component_to_world;
-						cache::closest_mesh_info = nearest_mesh_info[i];
-					}
-				}
-
-				// Get the head bone and component to world of the closest mesh
-				FTransform head_bone = cache::closest_mesh_info.cached_head_bone;
-				FTransform component_to_world = cache::closest_mesh_info.cached_component_to_world;
-				// Get the world space coordinates of the head bone
-				Vector3 head_world = get_world_space_coords(head_bone, component_to_world);
-				// Project the world space coordinates to screen
-				Vector2 head_screen = project_world_to_screen(head_world);
-
-				// Print the head screen coordinates
-				EXEC_ON_DEBUG(std::cout << "Head Screen X: " << head_screen.x << " Y: " << head_screen.y << std::endl);
-
-				// Get the center of the screen
-				Vector2 screen_center = { (double)settings::screen_center_x, (double)settings::screen_center_y };
-
-				// Calculate the difference between the head screen and the screen center
-				Vector2 diff = head_screen - screen_center;
-
-				// Adjust player controller rotation until diff is below a certain threshold
-
-				// Calculate vector length squared
-				double vector_length_squared = diff.x * diff.x + diff.y * diff.y;
-				
-				if (vector_length_squared > 2 && abs(diff.x) < settings::width && abs(diff.y) < settings::height) {
-					
-					pitch_integral += -diff.y;
-					yaw_integral += diff.x;
-
-					double derivative_pitch = -diff.y - previous_pitch_error;
-					double derivative_yaw = diff.x - previous_yaw_error;
-
-					// Get the player controller rotation
-					uintptr_t rotation_input = cache::player_controller + offsets::playercontroller_to_rotationinput;
-					double smoothness_y = 20.0;
-					double smoothness_x = 20.0;
-					// Print the difference
-					EXEC_ON_DEBUG(std::cout << "Diff X: " << diff.x << " Y: " << diff.y << std::endl);
-					if (abs(diff.y) < 10) {
-						smoothness_y = 30.0;
-					}
-					if (abs(diff.y) < 5) {
-						smoothness_y = 20.0;
-					}
-					if (abs(diff.x) < 10) {
-						smoothness_x = 30.0;
-					}
-					if (abs(diff.x) < 5) {
-						smoothness_x = 20.0;
-					}
-					// Set pitch rotation
-					if (abs(diff.y) > 2) {
-						mem.Write<double>(rotation_input, -diff.y / settings::height + pitch_integral * ki + kd * derivative_pitch);
-					}
-
-					// Set yaw rotation
-					if (abs(diff.x) > 2) {
-						mem.Write<double>(rotation_input + 0x8, diff.x / settings::width + yaw_integral * ki + kd * derivative_yaw);
-					}
-					previous_pitch_error = -diff.y;
-					previous_yaw_error = diff.x;
-				}
-
-				aimbot_in_action = true;
-				// Print performance
-				auto end = std::chrono::high_resolution_clock::now();
-				std::chrono::duration<double> elapsed = end - start;
-				EXEC_ON_DEBUG(std::cout << "Aimbot performance: " << elapsed.count() << "s" << std::endl);
-				Sleep(5);
 			}
+		} catch (std::exception& e) {
+			std::cout << e.what() << std::endl;
 		}
-		else {
-			aimbot_in_action = false;
-			if (mem.GetKeyboard()->IsKeyDown(VK_NUMPAD0)) {
-				settings::aimbot::enable = !settings::aimbot::enable;
-			}
-			Sleep(20);
+	}
+}
+
+void aimbot_toggle_check_thread() {
+	while (true) {
+		if (mem.GetKeyboard()->IsKeyDown(VK_NUMPAD0)) {
+			settings::aimbot::enable = !settings::aimbot::enable;
 		}
+		Sleep(100);
 	}
 }
 
@@ -226,6 +236,10 @@ int main()
 	// Start a new thread to get all player meshes every 20 seconds
 	std::thread get_all_player_meshes_thread(get_all_player_meshes, 500);
 	get_all_player_meshes_thread.detach();
+
+	// Start aimbot toggle check thread
+	std::thread aimbot_toggle_check_thread_run(aimbot_toggle_check_thread);
+	aimbot_toggle_check_thread_run.detach();
 
 	// Create aimbot thread
 	std::thread aimbot_thread(aimbot);
