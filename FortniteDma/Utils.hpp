@@ -176,6 +176,8 @@ namespace offsets
 	inline int playercontroller_to_playerstate = 0x298;
 	inline int pawn_to_isdying = 0x758;
 	inline int pawn_to_isdbno = 0x982;
+	inline int pawn_to_isattacking = 0x2200;
+	inline int playerstate_to_isabot = 0x29a;
 	inline int playerstate_to_teamid = 0x1211;
 
 }

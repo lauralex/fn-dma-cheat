@@ -74,7 +74,12 @@ void aimbot() {
 					EXEC_ON_DEBUG(std::cout << "Distance: " << world_space_distance << std::endl);
 					bool is_dying = mem.Read<BYTE>(mem.ReadChain(i.player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isdying) != 0;
 					bool is_dbno = mem.Read<BYTE>(mem.ReadChain(i.player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isdbno) >> 4 & 1;
-					if (distance < cache::closest_distance && !is_dying && !is_dbno) {
+					bool is_bot = mem.Read<BYTE>(i.player_state + offsets::playerstate_to_isabot) >> 3 & 1;
+					bool is_attacking_bot = false;
+					if (is_bot) {
+						is_attacking_bot = mem.Read<BYTE>(mem.ReadChain(i.player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isattacking) & 1;
+					}
+					if (distance < cache::closest_distance && !is_dying && !is_dbno && !(is_bot && !is_attacking_bot)) {
 						cache::closest_distance = distance;
 						i.cached_head_bone = head_bone;
 						i.cached_component_to_world = component_to_world;
@@ -145,7 +150,7 @@ void aimbot() {
 							EXEC_ON_DEBUG(std::cout << "Pitch: " << -diff.y / settings::screen_center_x * 7.0 + pitch_integral * ki + kd * derivative_pitch << std::endl);
 						}
 						else {
-							mem.Write<double>(rotation_input, - diff.y / settings::screen_center_x * 13.0 + pitch_integral * ki + kd * derivative_pitch);
+							mem.Write<double>(rotation_input, -diff.y / settings::screen_center_x * 13.0 + pitch_integral * ki + kd * derivative_pitch);
 							EXEC_ON_DEBUG(std::cout << "Pitch: " << -diff.y / settings::screen_center_x * 13.0 + pitch_integral * ki + kd * derivative_pitch << std::endl);
 						}
 					}
@@ -208,6 +213,12 @@ void aimbot_activation_thread() {
 void aimbot_toggle_check_thread() {
 	while (true) {
 		if (mem.GetKeyboard()->IsKeyDown(VK_NUMPAD0)) {
+			if (settings::aimbot::enable) {
+				std::cout << "Aimbot disabled" << std::endl;
+			}
+			else {
+				std::cout << "Aimbot enabled" << std::endl;
+			}
 			settings::aimbot::enable = !settings::aimbot::enable;
 		}
 		Sleep(100);
