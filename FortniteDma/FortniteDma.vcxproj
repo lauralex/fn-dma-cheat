@@ -143,6 +143,7 @@
     <ClInclude Include="Settings.hpp" />
     <ClInclude Include="UnrealContainers.hpp" />
     <ClInclude Include="Utils.hpp" />
+    <ClInclude Include="Weapons.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -8,6 +8,10 @@
 #define M_PI 3.14159265358979323846264338327950288419716939937510
 #define DEBUG false
 #define EXEC_ON_DEBUG(x) if (DEBUG) { x; }
+#define EXEC_ON_ARG(x, y) if (y) { x; }
+#define GEN_CHRONO_VAR_WITH_NUM_SUFFIX(x, y) auto x##y = std::chrono::high_resolution_clock::now();
+#define GET_CHRONO_ELAPSED(x, y, z) std::chrono::duration<double> x = y - z;
+
 
 class Vector2
 {
@@ -15,8 +19,8 @@ public:
 	Vector2() : x(0.f), y(0.f) {}
 	Vector2(const double _x, const double _y) : x(_x), y(_y) {}
 
-	Vector2 operator-(Vector2 v) const { return {x - v.x, y - v.y}; }
-	Vector2 operator+(Vector2 v) const { return {x + v.x, y + v.y}; }
+	Vector2 operator-(Vector2 v) const { return { x - v.x, y - v.y }; }
+	Vector2 operator+(Vector2 v) const { return { x + v.x, y + v.y }; }
 	double x, y;
 };
 
@@ -28,7 +32,7 @@ public:
 	double x, y, z;
 	double dot(Vector3 v) const { return x * v.x + y * v.y + z * v.z; }
 	double distance(Vector3 v) const { return double(sqrtf(powf(v.x - x, 2.0) + powf(v.y - y, 2.0) + powf(v.z - z, 2.0))); }
-	Vector3 operator-(Vector3 v) const { return {x - v.x, y - v.y, z - v.z}; }
+	Vector3 operator-(Vector3 v) const { return { x - v.x, y - v.y, z - v.z }; }
 };
 
 struct FQuat { double x, y, z, w; };
@@ -158,15 +162,29 @@ struct MeshInfoContainer
 	FTransform cached_head_bone;
 	uintptr_t component_to_world;
 	FTransform cached_component_to_world;
+	uintptr_t root_component;
 };
+
+inline bool is_valid(const uintptr_t address)
+{
+	if (address <= 0x400000 || address == 0xCCCCCCCCCCCCCCCC || address == 0 || address >
+		0x7FFFFFFFFFFFFFFF)
+	{
+		return false;
+	}
+
+	return true;
+}
 
 
 namespace offsets
 {
-	inline int uworld = 0x12634238;
+	inline int uworld = 0x126cf528;
 	inline int uworld_to_pgamestate = 0x160;
 	inline int gamestate_to_tpplayerstate_array = 0x2a8;
 	inline int playerstate_to_ppawn = 0x308;
+	inline int playerstate_to_isabot = 0x29a;
+	inline int playerstate_to_teamid = 0x1211;
 	inline int pawn_to_pmeshcomponent = 0x318;
 	inline int pawn_to_controller = 0x2c8;
 	inline int meshcomponent_to_bonearray = 0x5b0;
@@ -174,12 +192,16 @@ namespace offsets
 	inline int playercontroller_to_rotationinput = 0x520;
 	inline int playercontroller_to_rotationinput2 = 0x810;
 	inline int playercontroller_to_playerstate = 0x298;
+	inline int playercontroller_to_pawn = 0x338;
 	inline int pawn_to_isdying = 0x758;
 	inline int pawn_to_isdbno = 0x982;
-	inline int pawn_to_isattacking = 0x2200;
-	inline int playerstate_to_isabot = 0x29a;
-	inline int playerstate_to_teamid = 0x1211;
-
+	inline int pawn_to_isattacking = 0x6987;
+	inline int pawn_to_currentweapon = 0xa68;
+	inline int pawn_to_rootcomponent = 0x198;
+	inline int weapon_to_weapondata = 0x500;
+	inline int weapondata_to_weaponname = 0x40;
+	inline int weaponname_to_buf = 0x28;
+	inline int component_to_velocity = 0x168;
 }
 
 namespace cache
@@ -263,8 +285,8 @@ struct CompareDistance
 		Vector2 b_screen = project_world_to_screen(world_space_b);
 		double world_space_distance_a = world_space_a.distance(cache::local_camera.location);
 		double world_space_distance_b = world_space_b.distance(cache::local_camera.location);
-		double a_distance = 0.99 * (a_screen - screen_center).x * (a_screen - screen_center).x + 0.99 * (a_screen - screen_center).y * (a_screen - screen_center).y + 0.01 * world_space_distance_a * world_space_distance_a;
-		double b_distance = 0.99 * (b_screen - screen_center).x * (b_screen - screen_center).x + 0.99 * (b_screen - screen_center).y * (b_screen - screen_center).y + 0.01 * world_space_distance_b * world_space_distance_b;
+		double a_distance = 0.699 * (a_screen - screen_center).x * (a_screen - screen_center).x + 0.699 * (a_screen - screen_center).y * (a_screen - screen_center).y + 0.301 * world_space_distance_a * world_space_distance_a;
+		double b_distance = 0.699 * (b_screen - screen_center).x * (b_screen - screen_center).x + 0.699 * (b_screen - screen_center).y * (b_screen - screen_center).y + 0.301 * world_space_distance_b * world_space_distance_b;
 		return a_distance < b_distance;
 	}
 };
@@ -305,7 +327,7 @@ inline uintptr_t get_all_player_meshes(int interval) {
 				}
 
 				cache::mesh_info.clear();
-				
+
 				mem.Read(player_array_cursor, player_state_arr, player_count * 0x8);
 
 				// Update all mesh info for all player states in player_state_arr found in mesh_info, otherwise read mesh info from memory and add it to mesh_info
@@ -324,6 +346,15 @@ inline uintptr_t get_all_player_meshes(int interval) {
 					// Update mesh info for player state
 					uintptr_t player_state = player_state_arr[i];
 					if (player_state == 0) {
+						continue;
+					}
+
+					bool is_bot = mem.Read<BYTE>(player_state + offsets::playerstate_to_isabot) >> 3 & 1;
+					bool is_attacking_bot = false;
+					if (is_bot) {
+						is_attacking_bot = mem.Read<BYTE>(mem.ReadChain(player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isattacking) == 3;
+					}
+					if (is_bot && !is_attacking_bot) {
 						continue;
 					}
 
@@ -348,18 +379,22 @@ inline uintptr_t get_all_player_meshes(int interval) {
 					}
 
 					uintptr_t player_bone_array = mem.Read<uintptr_t>(player_mesh_component + offsets::meshcomponent_to_bonearray);
-					if (player_bone_array == 0) {
-						continue;
+					if (!is_valid(player_bone_array)) {
+						player_bone_array = mem.Read<uintptr_t>(player_mesh_component + offsets::meshcomponent_to_bonearray + 0x10);
+						if (!is_valid(player_bone_array)) {
+							continue;
+						}
 					}
 					uintptr_t head_bone = player_bone_array + 0x60 * 110;
-					
+
 					FTransform head_transform = mem.Read<FTransform>(head_bone);
 					uintptr_t component_to_world = player_mesh_component + offsets::meshcomponent_to_componenttoworld;
 					if (component_to_world == 0) {
 						continue;
 					}
 					FTransform component_to_world_transform = mem.Read<FTransform>(component_to_world);
-					cache::mesh_info.push_back({ player_state, head_bone, head_transform, component_to_world, component_to_world_transform });
+					uintptr_t root_component = mem.Read<uintptr_t>(player_pawn + offsets::pawn_to_rootcomponent);
+					cache::mesh_info.push_back({ player_state, head_bone, head_transform, component_to_world, component_to_world_transform, root_component });
 					//cache::mesh_info_map[player_state] = { player_state, head_bone, head_transform, component_to_world, component_to_world_transform };
 				}
 
@@ -377,7 +412,7 @@ inline uintptr_t get_all_player_meshes(int interval) {
 					// Recreate mesh_info_cache
 					cache::mesh_info_cache = cache::mesh_info;
 				}
-				
+
 
 
 				// Print performance
@@ -394,3 +429,54 @@ inline uintptr_t get_all_player_meshes(int interval) {
 	}
 }
 
+inline Vector3 predict_location(Vector3 target, const Vector3& target_velocity, float projectile_speed,
+                                float projectile_gravity_scale, float distance)
+{
+	if (projectile_speed == 0)
+	{
+		return target;
+	}
+	float horizontalTime = distance / projectile_speed;
+	float verticalTime = distance / projectile_speed;
+
+	//std::cout << "Horizontal time: " << horizontalTime << std::endl;
+	//std::cout << "Vertical time: " << verticalTime << std::endl;
+
+	target.x += target_velocity.x * horizontalTime;
+	target.y += target_velocity.y * horizontalTime;
+	target.z += target_velocity.z * verticalTime +
+		abs(-980 * projectile_gravity_scale) * 0.5f * (verticalTime * verticalTime);
+
+	return target;
+}
+
+inline std::unique_ptr<wchar_t[]> get_weapon_name() {
+	uintptr_t current_weapon = mem.Read<uintptr_t>(cache::local_pawn + offsets::pawn_to_currentweapon);
+	if (!is_valid(current_weapon)) {
+		return nullptr;
+	}
+
+	uintptr_t weapon_data = mem.Read<uintptr_t>(current_weapon + offsets::weapon_to_weapondata);
+	if (!is_valid(weapon_data)) {
+		return nullptr;
+	}
+
+	uintptr_t weapon_text_data = mem.Read<uintptr_t>(weapon_data + offsets::weapondata_to_weaponname);
+	if (!is_valid(weapon_text_data)) {
+		return nullptr;
+	}
+
+	uintptr_t weapon_name_buffer = mem.Read<uintptr_t>(weapon_text_data + offsets::weaponname_to_buf);
+	if (!is_valid(weapon_name_buffer)) {
+		return nullptr;
+	}
+	UINT weapon_name_length = mem.Read<UINT>(weapon_text_data + offsets::weaponname_to_buf + 0x8);
+	if (weapon_name_length == 0 || weapon_name_length > 50) {
+		return nullptr;
+	}
+
+	std::unique_ptr<wchar_t[]> weapon_name = std::make_unique<wchar_t[]>(weapon_name_length + 1);
+	mem.Read(weapon_name_buffer, weapon_name.get(), weapon_name_length * sizeof(wchar_t));
+	weapon_name[weapon_name_length] = L'\0';
+	return weapon_name;
+}
