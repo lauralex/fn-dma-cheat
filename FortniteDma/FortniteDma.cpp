@@ -20,8 +20,11 @@ void aimbot() {
 	double yaw_integral = 0;
 	//double kp = 0.5; //increase this value to increase aggressiveness
 	double last_elapsed = 0;
+
+	auto scatter_handle = mem.CreateScatterHandle();
+	auto scatter_handle_write = mem.CreateScatterHandle();
 	while (true) {
-		double ki = 0.0001; //increase this value to increase aggressiveness
+		double ki = 0.5; //increase this value to increase aggressiveness
 		double kd = 15.2; //increase this value to increase aggressiveness
 		if (aimbot_in_action && settings::aimbot::enable) {
 			if (cache::local_camera.fov < 70) {
@@ -30,8 +33,8 @@ void aimbot() {
 			try {
 				// aimbot code
 				// Measure performance
-				GEN_CHRONO_VAR_WITH_NUM_SUFFIX(start, 0)
-				cache::closest_mesh_info = MeshInfoContainer();
+				GEN_CHRONO_VAR_WITH_NUM_SUFFIX(start, 0);
+				cache::closest_mesh_info = MeshInfoContainer{};
 
 				nearest_mesh_info.clear();
 				// Get the nearest 3 mesh info
@@ -39,13 +42,12 @@ void aimbot() {
 					// Lock mutex
 					std::lock_guard lock(cache::mem_mutex);
 					// Get the nearest 3 mesh info if 3 are available, otherwise only one
-					for (int i = 0; i < 3 && i < cache::mesh_info_cache.size(); i++) {
-						nearest_mesh_info.push_back(cache::mesh_info_cache[i]);
-					}
+					int n_elements = min(3, cache::mesh_info_cache.size());
+					std::copy_n(cache::mesh_info_cache.begin(), n_elements, std::back_inserter(nearest_mesh_info));
 				}
 
 				if (nearest_mesh_info.empty()) {
-					EXEC_ON_ARG(std::cout << "No mesh info available" << std::endl, false)
+					EXEC_ON_ARG(std::cout << "No mesh info available" << '\n', false);
 					continue;
 				}
 
@@ -65,6 +67,9 @@ void aimbot() {
 				for (auto& i : nearest_mesh_info)
 				{
 					// Get real head bone
+					if (!is_valid(i.head_bone) || !is_valid(i.component_to_world)) {
+						continue;
+					}
 					FTransform head_bone = mem.Read<FTransform>(i.head_bone);
 					// Get real component to world
 					FTransform component_to_world = mem.Read<FTransform>(i.component_to_world);
@@ -73,9 +78,15 @@ void aimbot() {
 					double world_space_distance = world_space.distance(cache::local_camera.location);
 					Vector2 a_screen = project_world_to_screen(world_space);
 					double distance = 0.999 * (a_screen - screen_center).x * (a_screen - screen_center).x + 0.999 * (a_screen - screen_center).y * (a_screen - screen_center).y + 0.001 * world_space_distance * world_space_distance;
-					EXEC_ON_DEBUG(std::cout << "Distance: " << world_space_distance << std::endl);
-					bool is_dying = mem.Read<BYTE>(mem.ReadChain(i.player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isdying) != 0;
-					bool is_dbno = mem.Read<BYTE>(mem.ReadChain(i.player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isdbno) >> 4 & 1;
+					EXEC_ON_ARG(std::cout << "Distance: " << world_space_distance << '\n', false);
+					BYTE is_dying;
+					BYTE is_dbno;
+
+					mem.AddScatterReadRequest(scatter_handle, i.player_pawn + offsets::pawn_to_isdying, &is_dying, sizeof(is_dying));
+					mem.AddScatterReadRequest(scatter_handle, i.player_pawn + offsets::pawn_to_isdbno, &is_dbno, sizeof(is_dbno));
+					mem.ExecuteReadScatter(scatter_handle);
+					is_dbno = is_dbno >> 4 & 1;
+					is_dying = is_dying >> 4 & 1;
 
 					if (distance < cache::closest_distance && !is_dying && !is_dbno) {
 						cache::closest_distance = distance;
@@ -104,7 +115,7 @@ void aimbot() {
 				Vector2 head_screen = project_world_to_screen(head_world_adjusted);
 
 				// Print the head screen coordinates
-				EXEC_ON_DEBUG(std::cout << "Head Screen X: " << head_screen.x << " Y: " << head_screen.y << std::endl);
+				EXEC_ON_DEBUG(std::cout << "Head Screen X: " << head_screen.x << " Y: " << head_screen.y << '\n');
 
 				// Get the center of the screen
 				Vector2 screen_center = { (double)settings::screen_center_x, (double)settings::screen_center_y };
@@ -118,7 +129,7 @@ void aimbot() {
 				double vector_length_squared = diff.x * diff.x + diff.y * diff.y;
 
 				if (vector_length_squared > 2 && abs(diff.x) < settings::screen_center_x + 300 && abs(diff.y) < settings::screen_center_y + 300) {
-					GEN_CHRONO_VAR_WITH_NUM_SUFFIX(start, 1)
+					GEN_CHRONO_VAR_WITH_NUM_SUFFIX(start, 1);
 					pitch_integral += -diff.y / settings::screen_center_x;
 					yaw_integral += diff.x / settings::screen_center_x;
 
@@ -132,7 +143,7 @@ void aimbot() {
 					//double smoothness_x = 20.0;
 
 					// Print the difference
-					EXEC_ON_DEBUG(std::cout << "Diff X: " << diff.x << " Y: " << diff.y << std::endl);
+					EXEC_ON_DEBUG(std::cout << "Diff X: " << diff.x << " Y: " << diff.y << '\n');
 					/*if (abs(diff.y) < 10) {
 						smoothness_y = 30.0;
 					}
@@ -145,18 +156,25 @@ void aimbot() {
 					if (abs(diff.x) < 5) {
 						smoothness_x = 20.0;
 					}*/
-
+					bool modified = false;
 					// Set pitch rotation
 					if (abs(diff.y) > 2) {
+						modified = true;
 						if (cache::local_camera.fov < 39) {
 							ki = 0;
-							kd = 9.0f;
-							mem.Write<double>(rotation_input, std::clamp(-diff.y / settings::screen_center_x * 7.0 + pitch_integral * ki + kd * derivative_pitch, -0.2, 0.2));
-							EXEC_ON_DEBUG(std::cout << "Pitch: " << -diff.y / settings::screen_center_x * 7.0 + pitch_integral * ki + kd * derivative_pitch << std::endl);
+							kd = 9.0;
+							double input = std::clamp(-diff.y / settings::screen_center_x * 7.0 + pitch_integral * ki + kd * derivative_pitch, -0.2, 0.2);
+							mem.AddScatterWriteRequest(scatter_handle_write, rotation_input, &input, sizeof(input));
+							
+							EXEC_ON_DEBUG(std::cout << "Pitch: " << -diff.y / settings::screen_center_x * 7.0 + pitch_integral * ki + kd * derivative_pitch <<
+								'\n');
 						}
 						else {
-							mem.Write<double>(rotation_input, -diff.y / settings::screen_center_x * 13.1 + pitch_integral * ki + kd * derivative_pitch);
-							EXEC_ON_DEBUG(std::cout << "Pitch: " << -diff.y / settings::screen_center_x * 13.1 + pitch_integral * ki + kd * derivative_pitch << std::endl);
+							double input = -diff.y / settings::screen_center_x * 13.1 + pitch_integral * ki + kd * derivative_pitch;
+							mem.AddScatterWriteRequest(scatter_handle_write, rotation_input, &input, sizeof(input));
+							
+							EXEC_ON_DEBUG(std::cout << "Pitch: " << -diff.y / settings::screen_center_x * 13.1 + pitch_integral * ki + kd * derivative_pitch <<
+								'\n');
 						}
 					}
 					else {
@@ -165,41 +183,52 @@ void aimbot() {
 
 					// Set yaw rotation
 					if (abs(diff.x) > 2) {
+						modified = true;
 						if (cache::local_camera.fov < 39) {
 							ki = 0;
-							kd = 9.0f;
-							mem.Write<double>(rotation_input + 0x8, std::clamp(diff.x / settings::screen_center_x * 7.0 + yaw_integral * ki + kd * derivative_yaw, -0.2, 0.2));
-							EXEC_ON_DEBUG(std::cout << "Yaw: " << diff.x / settings::screen_center_x * 7.0 + yaw_integral * ki + kd * derivative_yaw << std::endl);
+							kd = 9.0;
+							double input = std::clamp(diff.x / settings::screen_center_x * 7.0 + yaw_integral * ki + kd * derivative_yaw, -0.2, 0.2);
+							mem.AddScatterWriteRequest(scatter_handle_write, rotation_input + 0x8, &input, sizeof(input));
+							
+							EXEC_ON_DEBUG(std::cout << "Yaw: " << diff.x / settings::screen_center_x * 7.0 + yaw_integral * ki + kd * derivative_yaw <<
+								'\n');
 						}
 						else {
-							mem.Write<double>(rotation_input + 0x8, diff.x / settings::screen_center_x * 13.1 + yaw_integral * ki + kd * derivative_yaw);
-							EXEC_ON_DEBUG(std::cout << "Yaw: " << diff.x / settings::screen_center_x * 13.1 + yaw_integral * ki + kd * derivative_yaw << std::endl);
+							double input = diff.x / settings::screen_center_x * 13.1 + yaw_integral * ki + kd * derivative_yaw;
+							mem.AddScatterWriteRequest(scatter_handle_write, rotation_input + 0x8, &input, sizeof(input));
+							
+							EXEC_ON_DEBUG(std::cout << "Yaw: " << diff.x / settings::screen_center_x * 13.1 + yaw_integral * ki + kd * derivative_yaw <<
+								'\n');
 						}
 					}
 					else {
 						yaw_integral = 0;
 					}
+					if (modified) {
+						mem.ExecuteWriteScatter(scatter_handle_write);
+					}
+
 					previous_pitch_error = -diff.y / settings::screen_center_x;
 					previous_yaw_error = diff.x / settings::screen_center_x;
-					GEN_CHRONO_VAR_WITH_NUM_SUFFIX(end, 1)
-					GET_CHRONO_ELAPSED(elapsed1, start1, end1)
+					GEN_CHRONO_VAR_WITH_NUM_SUFFIX(end, 1);
+					GET_CHRONO_ELAPSED(elapsed1, end1, start1);
 					if (elapsed1.count() - last_elapsed > 0.01) {
-						EXEC_ON_ARG(std::cout << "bad performance on MEM WRITE " << elapsed1.count() << std::endl, true)
+						EXEC_ON_ARG(std::cout << "bad performance on MEM WRITE " << elapsed1.count() << '\n', true);
 						last_elapsed = elapsed1.count();
 					}
 				}
 
 				// Print performance
-				GEN_CHRONO_VAR_WITH_NUM_SUFFIX(end, 0)
-				GET_CHRONO_ELAPSED(elapsed, start0, end0)
+				GEN_CHRONO_VAR_WITH_NUM_SUFFIX(end, 0);
+				GET_CHRONO_ELAPSED(elapsed, end0, start0);
 				if (elapsed.count() > 0.1) {
-					EXEC_ON_ARG(std::cout << "bad performance " << elapsed.count() << std::endl, true)
+					EXEC_ON_ARG(std::cout << "bad performance " << elapsed.count() << '\n', true);
 				}
-				EXEC_ON_DEBUG(std::cout << "Aimbot performance: " << elapsed.count() << "s" << std::endl);
+				EXEC_ON_DEBUG(std::cout << "Aimbot performance: " << elapsed.count() << "s" << '\n');
 				//Sleep(2);
 			}
 			catch (std::exception& e) {
-				std::cout << e.what() << std::endl;
+				std::cout << e.what() << '\n';
 			}
 		}
 		else {
@@ -221,7 +250,9 @@ void aimbot_activation_thread() {
 		else {
 			aimbot_in_action = false;
 		}
-		Sleep(100);
+		using namespace std::chrono_literals;
+		std::this_thread::sleep_for(101ms);
+		// Sleep(100);
 	}
 }
 
@@ -229,34 +260,39 @@ void aimbot_toggle_check_thread() {
 	while (true) {
 		if (mem.GetKeyboard()->IsKeyDown(VK_NUMPAD0)) {
 			if (settings::aimbot::enable) {
-				std::cout << "Aimbot disabled" << std::endl;
+				std::cout << "Aimbot disabled" << '\n';
 			}
 			else {
-				std::cout << "Aimbot enabled" << std::endl;
+				std::cout << "Aimbot enabled" << '\n';
 			}
 			settings::aimbot::enable = !settings::aimbot::enable;
 		}
-		Sleep(200);
+		using namespace std::chrono_literals;
+		std::this_thread::sleep_for(203ms);
+		// Sleep(200);
 	}
 }
 
-void print_weapon_name_thread()
+void weapon_update_thread()
 {
 	while (true)
 	{
+		cache::local_pawn = mem.ReadChain(cache::player_controller, { (UINT)offsets::playercontroller_to_pawn });
 		auto weapon_name = get_weapon_name();
 		if (weapon_name == nullptr || wcslen(weapon_name.get()) == 0)
 		{
 			// std::wcout << "Failed to get weapon name" << std::endl;
-			Sleep(1500);
+			using namespace std::chrono_literals;
+			std::this_thread::sleep_for(1507ms);
+			// Sleep(1500);
 			continue;
 		}
-		EXEC_ON_ARG(std::wcout << "Weapon name: " << weapon_name << std::endl, false)
+		EXEC_ON_ARG(std::wcout << "Weapon name: " << weapon_name << '\n', false)
 		// Get weapon projectile stats from weapon name
 		auto weapon_stats = weapon_projectile_map.find(weapon_name.get());
 		if (weapon_stats != weapon_projectile_map.end())
 		{
-			std::wcout << "Weapon projectile stats found" << std::endl;
+			std::wcout << "Weapon projectile stats found" << '\n';
 			projectile_stats::projectile_speed = weapon_stats->second.speed;
 			projectile_stats::gravity_scale = weapon_stats->second.gravity_scale;
 			// std::cout << "Projectile speed: " << projectile_stats::projectile_speed << " Gravity scale: " << projectile_stats::gravity_scale << std::endl;
@@ -268,7 +304,9 @@ void print_weapon_name_thread()
 			projectile_stats::gravity_scale = 0.0f;
 
 		}
-		Sleep(1500);
+		using namespace std::chrono_literals;
+		std::this_thread::sleep_for(1507ms);
+		// Sleep(1500);
 	}
 }
 
@@ -321,9 +359,11 @@ int main()
 
 	if (!mem.GetKeyboard()->InitKeyboard())
 	{
-		std::cout << "Failed to initialize keyboard hotkeys through kernel." << std::endl;
+		std::cout << "Failed to initialize keyboard hotkeys through kernel." << '\n';
 		return 1;
 	}
+
+	cache::camera_view_scatter_handle = mem.CreateScatterHandle();
 
 	cache::uworld = mem.ReadChain(base_address + offsets::uworld, { 0x00 });
 
@@ -337,13 +377,13 @@ int main()
 	}
 	cache::player_controller = mem.ReadChain(local_player, { 0x30 });
 	// Print the player controller address
-	std::cout << "Player controller address: " << std::hex << cache::player_controller << std::endl;
+	std::cout << "Player controller address: " << std::hex << cache::player_controller << '\n';
 	// Restore decimal output
 	std::cout << std::dec;
 
 	cache::local_pawn = mem.ReadChain(cache::player_controller, { (UINT)offsets::playercontroller_to_pawn });
 	// Print the player pawn address
-	std::cout << "Player pawn address: " << std::hex << cache::local_pawn << std::endl;
+	std::cout << "Player pawn address: " << std::hex << cache::local_pawn << '\n';
 	// Restore decimal output
 	std::cout << std::dec;
 
@@ -362,7 +402,7 @@ int main()
 	//aimbot_activation_thread_run.detach();
 
 	// Start weapon name print thread
-	std::thread print_weapon_name_thread_run(print_weapon_name_thread);
+	std::thread print_weapon_name_thread_run(weapon_update_thread);
 
 	// Create aimbot thread
 	std::thread aimbot_thread(aimbot);

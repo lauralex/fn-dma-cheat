@@ -157,12 +157,13 @@ struct FNRot
 
 struct MeshInfoContainer
 {
-	uintptr_t player_state;
+	uintptr_t player_state{0};
 	uintptr_t head_bone;
 	FTransform cached_head_bone;
 	uintptr_t component_to_world;
 	FTransform cached_component_to_world;
 	uintptr_t root_component;
+	uintptr_t player_pawn;
 };
 
 inline bool is_valid(const uintptr_t address)
@@ -229,22 +230,33 @@ namespace cache
 	inline std::vector<MeshInfoContainer> mesh_info_cache_copy;
 	// Mutex for DMA memory read between threads
 	inline std::mutex mem_mutex;
+	inline VMMDLL_SCATTER_HANDLE camera_view_scatter_handle;
 }
 
 inline Camera get_view_point()
 {
 	Camera view_point{};
-	uintptr_t location_pointer = mem.Read<uintptr_t>(cache::uworld + 0x110);
-	uintptr_t rotation_pointer = mem.Read<uintptr_t>(cache::uworld + 0x120);
+	uintptr_t location_pointer;
+	uintptr_t rotation_pointer;
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, cache::uworld + 0x110, &location_pointer, sizeof(uintptr_t));
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, cache::uworld + 0x120, &rotation_pointer, sizeof(uintptr_t));
+	mem.ExecuteReadScatter(cache::camera_view_scatter_handle);
+
 	FNRot fnrot{};
-	fnrot.a = mem.Read<double>(rotation_pointer);
-	fnrot.b = mem.Read<double>(rotation_pointer + 0x20);
-	fnrot.c = mem.Read<double>(rotation_pointer + 0x1D0);
-	view_point.location = mem.Read<Vector3>(location_pointer);
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, rotation_pointer, &fnrot.a, sizeof(double));
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, rotation_pointer + 0x20, &fnrot.b, sizeof(double));
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, rotation_pointer + 0x1D0, &fnrot.c, sizeof(double));
+	mem.ExecuteReadScatter(cache::camera_view_scatter_handle);
+
+	float fov;
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, location_pointer, &view_point.location, sizeof(Vector3));
+	mem.AddScatterReadRequest(cache::camera_view_scatter_handle, cache::player_controller + 0x394, &fov, sizeof(float));
+	mem.ExecuteReadScatter(cache::camera_view_scatter_handle);
 	view_point.rotation.x = asin(fnrot.c) * (180.0 / M_PI);
 	view_point.rotation.y = ((atan2(fnrot.a * -1, fnrot.b) * (180.0 / M_PI)) * -1) * -1;
-	view_point.fov = mem.Read<float>(cache::player_controller + 0x394) * 90.f;
+	view_point.fov = fov * 90.f;
 	//EXEC_ON_DEBUG(std::cout << "Location: " << view_point.location.x << " " << view_point.location.y << " " << view_point.location.z << " " << view_point.fov << std::endl);
+
 	return view_point;
 }
 
@@ -304,6 +316,7 @@ inline uintptr_t get_all_player_meshes(int interval) {
 	cache::mesh_info_cache_copy.reserve(200);
 
 	uintptr_t player_state_arr[200];
+	auto scatter_handle = mem.CreateScatterHandle();
 
 	while (true) {
 		{
@@ -312,7 +325,7 @@ inline uintptr_t get_all_player_meshes(int interval) {
 				// Measure performance
 				auto start = std::chrono::high_resolution_clock::now();
 
-				if (cache::player_array == 0) {
+				if (!is_valid(cache::player_array)) {
 					uintptr_t pgame_state = mem.Read<uintptr_t>(cache::uworld + offsets::uworld_to_pgamestate);
 					uintptr_t player_state_tarray = pgame_state + offsets::gamestate_to_tpplayerstate_array;
 					cache::player_array = player_state_tarray;
@@ -322,7 +335,7 @@ inline uintptr_t get_all_player_meshes(int interval) {
 				cache::player_count = player_count;
 
 				uintptr_t player_array_cursor = mem.Read<uintptr_t>(cache::player_array);
-				if (player_array_cursor == 0) {
+				if (!is_valid(player_array_cursor)) {
 					continue;
 				}
 
@@ -345,11 +358,24 @@ inline uintptr_t get_all_player_meshes(int interval) {
 					}*/
 					// Update mesh info for player state
 					uintptr_t player_state = player_state_arr[i];
-					if (player_state == 0) {
+					if (!is_valid(player_state)) {
+						continue;
+					}
+					BYTE player_team_id;
+					uintptr_t player_pawn;
+					BYTE is_bot;
+					mem.AddScatterReadRequest(scatter_handle, player_state + offsets::playerstate_to_teamid, &player_team_id, sizeof(BYTE));
+					mem.AddScatterReadRequest(scatter_handle, player_state + offsets::playerstate_to_ppawn, &player_pawn, sizeof(uintptr_t));
+					mem.AddScatterReadRequest(scatter_handle, player_state + offsets::playerstate_to_isabot, &is_bot, sizeof(BYTE));
+					mem.ExecuteReadScatter(scatter_handle);
+					is_bot = is_bot >> 3 & 1;
+					if (player_team_id == cache::my_team_id) {
+						continue;
+					}
+					if (!is_valid(player_pawn)) {
 						continue;
 					}
 
-					bool is_bot = mem.Read<BYTE>(player_state + offsets::playerstate_to_isabot) >> 3 & 1;
 					bool is_attacking_bot = false;
 					if (is_bot) {
 						is_attacking_bot = mem.Read<BYTE>(mem.ReadChain(player_state, { (UINT)offsets::playerstate_to_ppawn }) + offsets::pawn_to_isattacking) == 3;
@@ -358,43 +384,49 @@ inline uintptr_t get_all_player_meshes(int interval) {
 						continue;
 					}
 
-					BYTE player_team_id = mem.Read<BYTE>(player_state + offsets::playerstate_to_teamid);
-					if (player_team_id == cache::my_team_id) {
+					uintptr_t player_controller;
+					uintptr_t player_mesh_component;
+					uintptr_t root_component;
+					mem.AddScatterReadRequest(scatter_handle, player_pawn + offsets::pawn_to_controller, &player_controller, sizeof(uintptr_t));
+					mem.AddScatterReadRequest(scatter_handle, player_pawn + offsets::pawn_to_pmeshcomponent, &player_mesh_component, sizeof(uintptr_t));
+					mem.AddScatterReadRequest(scatter_handle, player_pawn + offsets::pawn_to_rootcomponent, &root_component, sizeof(uintptr_t));
+					mem.ExecuteReadScatter(scatter_handle);
+					if (!is_valid(player_mesh_component)) {
 						continue;
 					}
-
-					uintptr_t player_pawn = mem.Read<uintptr_t>(player_state + offsets::playerstate_to_ppawn);
-					if (player_pawn == 0) {
-						continue;
-					}
-					uintptr_t player_controller = mem.Read<uintptr_t>(player_pawn + offsets::pawn_to_controller);
+					// skip local player
 					if (player_controller == cache::player_controller) {
-						EXEC_ON_DEBUG(std::cout << "Local player state: " << player_state << std::endl);
-						// Skip because it's our player
-						continue;
-					}
-					uintptr_t player_mesh_component = mem.Read<uintptr_t>(player_pawn + offsets::pawn_to_pmeshcomponent);
-					if (player_mesh_component == 0) {
 						continue;
 					}
 
-					uintptr_t player_bone_array = mem.Read<uintptr_t>(player_mesh_component + offsets::meshcomponent_to_bonearray);
+					uintptr_t player_bone_array;
+					uintptr_t player_bone_array_cache;
+					uintptr_t component_to_world = player_mesh_component + offsets::meshcomponent_to_componenttoworld;
+
+					mem.AddScatterReadRequest(scatter_handle, player_mesh_component + offsets::meshcomponent_to_bonearray, &player_bone_array, sizeof(uintptr_t));
+					mem.AddScatterReadRequest(scatter_handle, player_mesh_component + offsets::meshcomponent_to_bonearray + 0x10, &player_bone_array_cache, sizeof(uintptr_t));
+					mem.ExecuteReadScatter(scatter_handle);
+
 					if (!is_valid(player_bone_array)) {
-						player_bone_array = mem.Read<uintptr_t>(player_mesh_component + offsets::meshcomponent_to_bonearray + 0x10);
+						player_bone_array = player_bone_array_cache;
 						if (!is_valid(player_bone_array)) {
 							continue;
 						}
 					}
-					uintptr_t head_bone = player_bone_array + 0x60 * 110;
 
-					FTransform head_transform = mem.Read<FTransform>(head_bone);
-					uintptr_t component_to_world = player_mesh_component + offsets::meshcomponent_to_componenttoworld;
-					if (component_to_world == 0) {
+					if (!is_valid(component_to_world)) {
 						continue;
 					}
-					FTransform component_to_world_transform = mem.Read<FTransform>(component_to_world);
-					uintptr_t root_component = mem.Read<uintptr_t>(player_pawn + offsets::pawn_to_rootcomponent);
-					cache::mesh_info.push_back({ player_state, head_bone, head_transform, component_to_world, component_to_world_transform, root_component });
+
+					uintptr_t head_bone = player_bone_array + 0x60 * 110;
+
+					FTransform head_transform;
+					FTransform component_to_world_transform;
+					mem.AddScatterReadRequest(scatter_handle, head_bone, &head_transform, sizeof(FTransform));
+					mem.AddScatterReadRequest(scatter_handle, component_to_world, &component_to_world_transform, sizeof(FTransform));
+					mem.ExecuteReadScatter(scatter_handle);
+
+					cache::mesh_info.push_back({ player_state, head_bone, head_transform, component_to_world, component_to_world_transform, root_component, player_pawn });
 					//cache::mesh_info_map[player_state] = { player_state, head_bone, head_transform, component_to_world, component_to_world_transform };
 				}
 
@@ -405,27 +437,29 @@ inline uintptr_t get_all_player_meshes(int interval) {
 				//cache::mesh_info_cache_copy = cache::mesh_info;
 
 				std::ranges::sort(cache::mesh_info, CompareDistance());
-
 				{
 					// Lock mutex
 					std::lock_guard lock(cache::mem_mutex);
 					// Recreate mesh_info_cache
-					cache::mesh_info_cache = cache::mesh_info;
+					cache::mesh_info_cache.clear();
+					int numElementsToCopy = min(static_cast<int>(cache::mesh_info.size()), 5);
+					EXEC_ON_ARG(std::cout << "Num elements to copy: " << numElementsToCopy << '\n', false);
+					std::copy_n(cache::mesh_info.begin(), numElementsToCopy, std::back_inserter(cache::mesh_info_cache));
 				}
-
 
 
 				// Print performance
 				auto end = std::chrono::high_resolution_clock::now();
 				std::chrono::duration<double> elapsed = end - start;
-				EXEC_ON_DEBUG(std::cout << "Time to read all player meshes: " << elapsed.count() << "s" << std::endl);
+				EXEC_ON_DEBUG(std::cout << "Time to read all player meshes: " << elapsed.count() << "s" << '\n');
 			}
 			catch (std::exception& e) {
-				EXEC_ON_DEBUG(std::cout << "Error reading player meshes: " << e.what() << std::endl);
+				EXEC_ON_DEBUG(std::cout << "Error reading player meshes: " << e.what() << '\n');
 			}
 		}
 
-		Sleep(interval);
+		std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+		// Sleep(interval);
 	}
 }
 
